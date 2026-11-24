@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#10141c">
+  <title>chrootbox</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+  <style>
+    :root { color-scheme: dark; background: #10141c; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    #terminal {
+      width: 100%;
+      height: 100%;
+      padding: 2px;
+      background: #10141c;
+    }
+    .xterm .xterm-viewport {
+      scrollbar-width: thin;
+      scrollbar-color: #394559 #10141c;
+    }
+    .xterm-viewport::-webkit-scrollbar { width: 8px; }
+    .xterm-viewport::-webkit-scrollbar-thumb {
+      border: 2px solid #10141c;
+      border-radius: 8px;
+      background: #394559;
+    }
+  </style>
+</head>
+<body>
+  <div id="terminal" aria-label="Chroot terminal"></div>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+  <script>
+    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const term = new Terminal({
+      fontFamily: 'Consolas, "Liberation Mono", monospace',
+      fontSize: 16,
+      lineHeight: 1,
+      cursorStyle: 'block',
+      cursorBlink: !reducedMotion,
+      cursorInactiveStyle: 'outline',
+      scrollback: 5000,
+      theme: {
+        background: '#10141c', foreground: '#dde5f0',
+        cursor: '#dde5f0', cursorAccent: '#10141c',
+        selectionBackground: '#334761', selectionInactiveBackground: '#293548',
+        black: '#202938', brightBlack: '#929fb3',
+        red: '#ed8796', brightRed: '#f5a0ad',
+        green: '#a6da95', brightGreen: '#b8e8a8',
+        yellow: '#eed49f', brightYellow: '#f5dfb3',
+        blue: '#8aadf4', brightBlue: '#a6c1ff',
+        magenta: '#c6a0f6', brightMagenta: '#d8b8ff',
+        cyan: '#8bd5ca', brightCyan: '#a3e5dc',
+        white: '#c5cede', brightWhite: '#f1f5fc',
+      },
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById('terminal'));
+    fit.fit();
+    term.focus();
+    const socket = new WebSocket({{ url_for('terminal', sid=sid)|tojson }});
+    socket.binaryType = 'arraybuffer';
+    const send = (message) => {
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+    };
+    const resize = () => send({ type: 'resize', cols: term.cols, rows: term.rows });
+    socket.onopen = resize;
+    socket.onmessage = ({ data }) => term.write(typeof data === 'string' ? data : new Uint8Array(data));
+    socket.onclose = () => {
+      term.options.disableStdin = true;
+      term.write('\r\n\x1b[90mSession ended. Open /new to start again.\x1b[0m\r\n');
+    };
+    term.onData((data) => {
+      // Keep large pastes within the server's WebSocket message limit.
+      for (const chunk of data.match(/[\s\S]{1,4096}/gu) || []) send({ type: 'input', data: chunk });
+    });
+    term.onResize(resize);
+    new ResizeObserver(() => fit.fit()).observe(document.getElementById('terminal'));
+    window.addEventListener('pagehide', () => {
+      navigator.sendBeacon({{ url_for('disconnect', sid=sid)|tojson }});
+      socket.close();
+    });
+  </script>
+</body>
+</html>
