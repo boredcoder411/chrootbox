@@ -29,6 +29,7 @@ def copy_host_path(path, root):
     path = Path(os.path.abspath(path))
     if not path.exists() and not path.is_symlink():
         return
+    # keep each symlink in the rootfs and copy its eventual target too
     seen = set()
     while True:
         name = str(path)
@@ -73,6 +74,7 @@ def install_shell_config(root):
 
 def elf_info(path):
     try:
+        # readelf gives the loader path and direct shared library names
         out = subprocess.run(['readelf', '-l', '-d', str(path)],
                              text=True, capture_output=True)
         if out.returncode != 0 or 'ELF' not in path.open('rb').read(4).decode('latin1'):
@@ -84,6 +86,7 @@ def elf_info(path):
         return None
 
 def dependencies(path):
+    # ldd resolves library names to the host paths needed in the rootfs
     out = subprocess.run(['ldd', str(path)], text=True, capture_output=True)
     if out.returncode:
         if 'not a dynamic executable' in out.stdout + out.stderr or 'statically linked' in out.stdout + out.stderr:
@@ -111,6 +114,7 @@ def is_elf(path):
 
 def install_runtime(root):
     visited = set()
+    # copied libraries may need more libraries, so scan until none are new
     while True:
         pending = [p for p in root.rglob('*') if p.is_file() and not p.is_symlink()
                    and is_elf(p) and str(p.relative_to(root)) not in visited]
@@ -136,6 +140,7 @@ def copy_development_files(root):
     for name in ('crt1.o', 'Scrt1.o', 'rcrt1.o', 'crti.o', 'crtn.o',
                  'libc.so', 'libm.so', 'libpthread.so', 'libdl.so',
                  'librt.so', 'libresolv.so', 'libgcc_s.so.1'):
+        # ask the host compiler where its startup objects and libraries live
         resolved = run(cc, '-print-file-name=' + name, capture=True).strip()
         if resolved and resolved != name and Path(resolved).exists():
             copy_host_path(resolved, root)
@@ -154,6 +159,7 @@ def copy_development_files(root):
                 for target in re.findall(r'(?<![\w])(/(?:usr/)?lib[^\s(),]+)', text):
                     copy_host_path(target, root)
 
+    # name service modules are loaded at runtime and may not appear in ldd
     for base in ('/lib', '/lib64', '/usr/lib', '/usr/lib64'):
         directory = Path(base)
         if directory.is_dir():
@@ -189,6 +195,7 @@ def build(name, src, root, jobs):
         run('make', f'-j{jobs}', cwd=src, env=env)
         run('make', 'install', f'DESTDIR={root}', cwd=src, env=env)
     elif name == 'vim':
+        # keep vim small and avoid optional language and GUI dependencies
         vsrc = src / 'src'
         run('./configure', '--prefix=/usr', '--with-features=tiny',
             '--without-x', '--disable-gui', '--disable-nls',
@@ -207,12 +214,14 @@ def build(name, src, root, jobs):
 
 
 def prepare(root):
+    # create the basic filesystem layout before installing programs
     for name in ('bin', 'usr/bin', 'usr/lib', 'lib', 'lib64', 'etc', 'tmp',
                  'var/tmp', 'root', 'home', 'dev', 'proc', 'sys', 'run'):
         (root / name).mkdir(parents=True, exist_ok=True)
     for name in ('tmp', 'var/tmp'):
         (root / name).chmod(0o1777)
     (root / 'root').chmod(0o700)
+    # the shell needs a root account and local name lookup inside the chroot
     (root / 'etc/passwd').write_text('root:x:0:0:root:/root:/bin/sh\n')
     (root / 'etc/group').write_text('root:x:0:\n')
     (root / 'etc/nsswitch.conf').write_text('passwd: files\ngroup: files\nhosts: files dns\n')
@@ -222,6 +231,7 @@ def prepare(root):
 
 
 def archive(root, output):
+    # preserve symlinks so absolute paths still work after extraction
     with tarfile.open(output, 'w:gz', dereference=False, format=tarfile.PAX_FORMAT) as tar:
         for path in sorted(root.rglob('*')):
             tar.add(path, arcname=str(path.relative_to(root)), recursive=False)
@@ -245,6 +255,7 @@ def main():
         work.mkdir(parents=True, exist_ok=True)
         cleanup = False
     else:
+        # temporary sources and staging files are removed after packaging
         work = Path(tempfile.mkdtemp(prefix='chroot-build-'))
         cleanup = True
     root = work / 'rootfs'
@@ -252,6 +263,7 @@ def main():
     output = args.output.resolve()
     try:
         prepare(root)
+        # build each program into the staged root, then add host runtime files
         for name, url in REPOS.items():
             src = work / name
             run('git', 'clone', '--depth', '1', url, src)
@@ -270,6 +282,7 @@ def main():
             if any(p.name == name for p in root.rglob('*')):
                 raise RuntimeError(f'excluded executable found in rootfs: {name}')
         for path in ('usr/bin/bash', 'usr/bin/tcc', 'usr/bin/vi'):
+            # fail before archiving if a required program was not installed
             if not (root / path).exists():
                 raise RuntimeError(f'missing expected program: {path}')
         output.parent.mkdir(parents=True, exist_ok=True)

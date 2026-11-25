@@ -33,9 +33,12 @@ class Session:
         self.manager = manager
         self.sid = uuid.uuid4().hex
         self.root = manager.directory / self.sid
+        # ready also wakes create() when startup fails
         self.stop = threading.Event()
         self.ready = threading.Event()
+        # only one websocket can own a terminal at a time
         self.attached = threading.Lock()
+        # bounded queues keep a slow peer from growing memory without limit
         self.input = queue.Queue(maxsize=256)
         self.output = queue.Queue(maxsize=256)
         self.error = None
@@ -46,10 +49,12 @@ class Session:
         master = slave = None
         try:
             self.root.mkdir(parents=True, mode=0o700)
+            # each session gets its own unpacked root filesystem
             if not self.extract():
                 return
             master, slave = pty.openpty()
             fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
+            # unshare starts the child with separate user, mount, and PID namespaces
             process = subprocess.Popen(
                 ['unshare', '--user', '--map-root-user', '--mount', '--pid',
                  '--fork', '--kill-child=SIGKILL', sys.executable,
@@ -65,6 +70,7 @@ class Session:
             deadline = time.monotonic() + 60
             pending = bytearray()
             while not self.stop.is_set():
+                # expire sessions that never connect or have lost their websocket
                 if not self.attached.locked() and time.monotonic() > deadline:
                     break
                 try:
@@ -77,6 +83,7 @@ class Session:
                     cols, rows = value
                     fcntl.ioctl(master, termios.TIOCSWINSZ,
                                 struct.pack('HHHH', rows, cols, 0, 0))
+                # pause PTY reads while output is backed up; retry partial writes
                 readable, writable, _ = select.select(
                     [master] if not self.output.full() else [],
                     [master] if pending else [], [], 0.02)
@@ -139,6 +146,7 @@ class Session:
             )
             try:
                 while process.poll() is None:
+                    # extraction can be cancelled before the shell starts
                     if self.stop.wait(0.02):
                         return False
                 if process.returncode:
@@ -147,6 +155,7 @@ class Session:
                 return not self.stop.is_set()
             finally:
                 if process.poll() is None:
+                    # tar runs in its own process group for cancellation
                     try:
                         os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:
@@ -171,6 +180,7 @@ class Sessions:
         with self.lock:
             self.sessions[session.sid] = session
             session.thread.start()
+        # wait until the PTY is usable or startup reports an error
         session.ready.wait()
         if session.error:
             session.close()
@@ -200,6 +210,7 @@ def create_app(archive=None, directory=None):
 
     @app.before_request
     def same_origin():
+        # reject browser requests arriving from a different site
         origin = request.headers.get('Origin')
         if (origin and origin != request.host_url.rstrip('/')) or request.headers.get('Sec-Fetch-Site') == 'cross-site':
             abort(403)
@@ -243,6 +254,7 @@ def create_app(archive=None, directory=None):
             return
         try:
             while True:
+                # drain some PTY output before waiting for the next client message
                 for _ in range(16):
                     try:
                         ws.send(session.output.get_nowait())
@@ -256,6 +268,7 @@ def create_app(archive=None, directory=None):
                 if raw is None:
                     continue
                 try:
+                    # the client sends only text input and bounded terminal sizes
                     message = json.loads(raw)
                     kind = message['type']
                     if kind == 'input' and isinstance(message['data'], str):
@@ -277,6 +290,7 @@ def create_app(archive=None, directory=None):
         except ConnectionClosed:
             pass
         finally:
+            # disconnecting the websocket also tears down its shell
             session.close()
             session.attached.release()
             try:

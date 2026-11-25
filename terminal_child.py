@@ -13,8 +13,10 @@ def main():
         target = root / 'dev' / name
         target.touch()
         subprocess.run(['mount', '--bind', f'/dev/{name}', str(target)], check=True)
+    # give bash a controlling terminal on the PTY passed by the parent
     os.setsid()
     fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    # enter the staged filesystem before replacing this process with bash
     os.chroot(root)
     os.chdir('/root')
     os.environ['SHELL'] = '/bin/bash'
